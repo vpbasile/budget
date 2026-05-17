@@ -48,9 +48,21 @@ def run_budget_analyzer_menu() -> None:
 
     args: list[str] = []
 
-    transactions_file = prompt("Groomed transactions file", "data/groomed_transactions.csv")
-    if transactions_file:
-        args.extend(["--transactions-file", transactions_file])
+    db_path = prompt("SQLite DB path", "data/budget_qa.db")
+    if db_path:
+        args.extend(["--db-path", db_path])
+
+    csv_file = prompt("Source CSV file(s), comma-separated", "")
+    if csv_file:
+        args.extend(["--csv-file", csv_file])
+
+    crosswalk = prompt("Crosswalk path", "data/merchant_crosswalk.md")
+    if crosswalk:
+        args.extend(["--crosswalk", crosswalk])
+
+    rebuild = prompt("Rebuild DB before analysis", "n").lower() in {"y", "yes"}
+    if rebuild:
+        args.append("--rebuild")
 
     model = prompt("Model", "llama3.2")
     if model:
@@ -87,9 +99,13 @@ def run_interactive_qa_menu() -> None:
     if db_path:
         args.extend(["--db-path", db_path])
 
-    csv_file = prompt("Transactions CSV file", "data/groomed_transactions.csv")
+    csv_file = prompt("Source CSV file(s), comma-separated", "")
     if csv_file:
         args.extend(["--csv-file", csv_file])
+
+    crosswalk = prompt("Crosswalk path", "data/merchant_crosswalk.md")
+    if crosswalk:
+        args.extend(["--crosswalk", crosswalk])
 
     rebuild = prompt("Rebuild cache now", "y").lower() in {"y", "yes"}
     if rebuild:
@@ -98,39 +114,35 @@ def run_interactive_qa_menu() -> None:
     run_script("interactive_qa.py", args)
 
 
-def run_export_groomed_data_menu() -> None:
-    print("\nGroom CSV options")
+def run_build_sqlite_db_menu() -> None:
+    print("\nBuild SQLite DB options")
     use_defaults = prompt("Use defaults", "y").lower() in {"y", "yes"}
     if use_defaults:
-        run_script("export_groomed_data.py", ["--rebuild"])
+        run_script("build_sqlite_db.py")
         return
 
     args: list[str] = []
-
-    output = prompt("Output CSV path", "data/groomed_transactions.csv")
-    if output:
-        args.extend(["--output", output])
 
     db_path = prompt("SQLite DB path", "data/budget_qa.db")
     if db_path:
         args.extend(["--db-path", db_path])
 
-    csv_file = prompt("Transactions CSV file", "data/groomed_transactions.csv")
+    csv_file = prompt("Source CSV file(s), comma-separated", "")
     if csv_file:
         args.extend(["--csv-file", csv_file])
 
-    rebuild = prompt("Rebuild cache now", "y").lower() in {"y", "yes"}
-    if rebuild:
-        args.append("--rebuild")
+    crosswalk = prompt("Crosswalk path", "data/merchant_crosswalk.md")
+    if crosswalk:
+        args.extend(["--crosswalk", crosswalk])
 
-    run_script("export_groomed_data.py", args)
+    run_script("build_sqlite_db.py", args)
 
 
 def show_menu() -> None:
     print("Budget App Entry Point")
     print("=" * 24)
-    print("1) Groom CSV")
-    print("2) Analyze groomed file")
+    print("1) Build SQLite DB")
+    print("2) Analyze SQLite DB")
     print("3) Interactive data Q&A (Ollama)")
     print("4) Exit")
 
@@ -141,7 +153,7 @@ def main() -> None:
         choice = input("\nSelect an option: ").strip()
 
         if choice == "1":
-            run_export_groomed_data_menu()
+            run_build_sqlite_db_menu()
         elif choice == "2":
             run_budget_analyzer_menu()
         elif choice == "3":

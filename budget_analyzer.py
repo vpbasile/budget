@@ -4,26 +4,38 @@
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import sys
 from pathlib import Path
 
 from budget_core import (
-    DEFAULT_GROOMED_TRANSACTIONS_FILE,
+    DEFAULT_CROSSWALK_FILE,
     DEFAULT_MODEL,
     DEFAULT_UNMATCHED_REPORT_FILE,
     aggregate,
-    load_transactions,
 )
 from budget_reporting import generate_budget_report
+from budget_storage import DEFAULT_DB_PATH, fetch_transactions, rebuild_cache
 from unmatched_report import write_unmatched_merchants_report
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Analyze bank transactions and generate a budget using Ollama.")
+    parser.add_argument("--db-path", default=str(DEFAULT_DB_PATH), help=f"SQLite DB path (default: {DEFAULT_DB_PATH})")
     parser.add_argument(
-        "--transactions-file",
-        default=str(DEFAULT_GROOMED_TRANSACTIONS_FILE),
-        help=f"Path to groomed transactions CSV (default: {DEFAULT_GROOMED_TRANSACTIONS_FILE})",
+        "--csv-file",
+        default=None,
+        help="Source CSV file(s), comma-separated. Defaults to data/history*.csv excluding *_nocat.csv.",
+    )
+    parser.add_argument(
+        "--crosswalk",
+        default=str(DEFAULT_CROSSWALK_FILE),
+        help=f"Merchant/category crosswalk path (default: {DEFAULT_CROSSWALK_FILE})",
+    )
+    parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="Rebuild the SQLite database from source CSV data before analysis.",
     )
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"Ollama model to use (default: {DEFAULT_MODEL})")
     parser.add_argument("--output", default="data/budget_report.md", help="Output file for the budget report")
@@ -40,12 +52,22 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    transactions_path = Path(args.transactions_file)
-    if not transactions_path.exists():
-        sys.exit(f"❌  Groomed transactions file not found: {transactions_path}")
+    db_path = Path(args.db_path)
+    if args.rebuild or not db_path.exists():
+        print("Building local SQLite cache from source CSV data...")
+        inserted, skipped = rebuild_cache(db_path, args.csv_file, Path(args.crosswalk))
+        print(f"Cache ready: {inserted} row(s), {skipped} row(s) with unparseable date format.")
 
-    print(f"📂  Loading groomed transactions from {transactions_path}...")
-    enriched = load_transactions(str(transactions_path))
+    if not db_path.exists():
+        sys.exit(f"❌  SQLite database not found: {db_path}")
+
+    print(f"📂  Loading transactions from SQLite DB: {db_path}...")
+    conn = sqlite3.connect(db_path)
+    try:
+        enriched = fetch_transactions(conn)
+    finally:
+        conn.close()
+
     print(f"    Total: {len(enriched)} transactions.")
 
     matched_count = sum(1 for tx in enriched if tx["category"] != "Other")

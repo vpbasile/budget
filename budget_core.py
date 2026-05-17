@@ -15,7 +15,6 @@ import requests
 OLLAMA_URL = "http://localhost:11434/api/chat"
 DEFAULT_MODEL = "llama3.2"
 DEFAULT_CROSSWALK_FILE = Path("data") / "merchant_crosswalk.md"
-DEFAULT_GROOMED_TRANSACTIONS_FILE = Path("data") / "groomed_transactions.csv"
 DEFAULT_UNMATCHED_REPORT_FILE = Path("data") / "unmatched_merchants_report.csv"
 DATE_FORMATS = ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%d/%m/%Y")
 
@@ -178,13 +177,13 @@ def crosswalk_match(description: str, crosswalk: list[tuple[re.Pattern[str], str
 
 
 def load_transactions(csv_path: str) -> list[dict]:
-    """Load transactions from either raw bank CSVs or the groomed canonical CSV."""
+    """Load transactions from either raw bank CSVs or canonical transaction CSVs."""
     transactions = []
     source_file = Path(csv_path).name
     with open(csv_path, newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         fieldnames = {name.strip() for name in (reader.fieldnames or []) if name}
-        is_groomed = {
+        is_canonical = {
             "source_file",
             "source_row",
             "date_raw",
@@ -197,7 +196,7 @@ def load_transactions(csv_path: str) -> list[dict]:
         }.issubset(fieldnames)
 
         for source_row, row in enumerate(reader, start=2):
-            if is_groomed:
+            if is_canonical:
                 raw_amount = row.get("amount")
                 amount = parse_amount(raw_amount)
                 if amount is None:

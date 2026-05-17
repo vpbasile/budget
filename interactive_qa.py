@@ -8,10 +8,10 @@ import re
 import sqlite3
 from pathlib import Path
 
-from budget_core import DEFAULT_GROOMED_TRANSACTIONS_FILE, DEFAULT_MODEL, ollama_chat
+from budget_core import DEFAULT_CROSSWALK_FILE, DEFAULT_MODEL, ollama_chat
 from budget_storage import (
     DEFAULT_DB_PATH,
-    DEFAULT_GROOMED_EXPORT_PATH,
+    DEFAULT_TRANSACTIONS_EXPORT_PATH,
     export_transactions_csv,
     rebuild_cache,
     stats_context,
@@ -44,8 +44,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db-path", default=str(DEFAULT_DB_PATH), help=f"SQLite cache path (default: {DEFAULT_DB_PATH})")
     parser.add_argument(
         "--csv-file",
-        default=str(DEFAULT_GROOMED_TRANSACTIONS_FILE),
-        help=f"Transactions CSV input (default: {DEFAULT_GROOMED_TRANSACTIONS_FILE})",
+        default=None,
+        help="Source CSV file(s), comma-separated. Defaults to data/history*.csv excluding *_nocat.csv.",
+    )
+    parser.add_argument(
+        "--crosswalk",
+        default=str(DEFAULT_CROSSWALK_FILE),
+        help=f"Merchant/category crosswalk path (default: {DEFAULT_CROSSWALK_FILE})",
     )
     parser.add_argument("--rebuild", action="store_true", help="Rebuild the SQLite cache before starting")
     return parser.parse_args()
@@ -54,24 +59,26 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     db_path = Path(args.db_path)
+    crosswalk_path = Path(args.crosswalk)
 
-    ensure_cache(db_path, args.csv_file, force_rebuild=args.rebuild)
-    run_repl(db_path, args.csv_file, model=args.model)
+    ensure_cache(db_path, args.csv_file, crosswalk_path, force_rebuild=args.rebuild)
+    run_repl(db_path, args.csv_file, crosswalk_path, model=args.model)
 
 
 def ensure_cache(
     db_path: Path,
     csv_file: str | None,
+    crosswalk_path: Path,
     *,
     force_rebuild: bool,
 ) -> None:
     if force_rebuild or not db_path.exists():
-        print("Building local SQLite cache from CSV data...")
-        inserted, skipped = rebuild_cache(db_path, csv_file)
+        print("Building local SQLite cache from source CSV data...")
+        inserted, skipped = rebuild_cache(db_path, csv_file, crosswalk_path)
         print(f"Cache ready: {inserted} row(s), {skipped} row(s) with unparseable date format.")
 
 
-def run_repl(db_path: Path, csv_file: str | None, *, model: str) -> None:
+def run_repl(db_path: Path, csv_file: str | None, crosswalk_path: Path, *, model: str) -> None:
     conn = sqlite3.connect(db_path)
     try:
         print("\nInteractive data Q&A is ready.")
@@ -82,7 +89,7 @@ def run_repl(db_path: Path, csv_file: str | None, *, model: str) -> None:
             if not question:
                 continue
 
-            outcome = handle_command(question, conn, db_path, csv_file)
+            outcome = handle_command(question, conn, db_path, csv_file, crosswalk_path)
             if outcome == "quit":
                 print("Goodbye.")
                 return
@@ -108,6 +115,7 @@ def handle_command(
     conn: sqlite3.Connection,
     db_path: Path,
     csv_file: str | None,
+    crosswalk_path: Path,
 ) -> str | sqlite3.Connection:
     if question in {":quit", ":q", "quit", "exit"}:
         return "quit"
@@ -118,9 +126,9 @@ def handle_command(
 
     if question.startswith(":export"):
         parts = question.split(maxsplit=1)
-        output_path = Path(parts[1]) if len(parts) > 1 else DEFAULT_GROOMED_EXPORT_PATH
+        output_path = Path(parts[1]) if len(parts) > 1 else DEFAULT_TRANSACTIONS_EXPORT_PATH
         count = export_transactions_csv(conn, output_path)
-        print(f"Exported {count} groomed row(s) to {output_path}")
+        print(f"Exported {count} row(s) to {output_path}")
         return "handled"
 
     if question.startswith(":income"):
@@ -157,7 +165,7 @@ def handle_command(
 
     if question == ":rebuild":
         conn.close()
-        inserted, skipped = rebuild_cache(db_path, csv_file)
+        inserted, skipped = rebuild_cache(db_path, csv_file, crosswalk_path)
         new_conn = sqlite3.connect(db_path)
         print(f"Cache rebuilt: {inserted} row(s), {skipped} row(s) with unparseable date format.")
         return new_conn
@@ -213,11 +221,12 @@ def deterministic_income_summary(conn: sqlite3.Connection, month: str | None) ->
         row = conn.execute(
             """
             SELECT
-                COALESCE(SUM(CASE WHEN category = 'Income' THEN amount ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN amount < 0 AND category != 'Transfer' THEN amount ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN category = 'Transfer' THEN amount ELSE 0 END), 0)
-            FROM transactions
-            WHERE month = ?
+                COALESCE(SUM(CASE WHEN c.name = 'Income' THEN t.amount ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN t.amount < 0 AND c.name != 'Transfer' THEN t.amount ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN c.name = 'Transfer' THEN t.amount ELSE 0 END), 0)
+            FROM transactions t
+            JOIN categories c ON c.id = t.category_id
+            WHERE substr(t.posted_date, 1, 7) = ?
             """,
             (month,),
         ).fetchone()
@@ -226,10 +235,11 @@ def deterministic_income_summary(conn: sqlite3.Connection, month: str | None) ->
         row = conn.execute(
             """
             SELECT
-                COALESCE(SUM(CASE WHEN category = 'Income' THEN amount ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN amount < 0 AND category != 'Transfer' THEN amount ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN category = 'Transfer' THEN amount ELSE 0 END), 0)
-            FROM transactions
+                COALESCE(SUM(CASE WHEN c.name = 'Income' THEN t.amount ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN t.amount < 0 AND c.name != 'Transfer' THEN t.amount ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN c.name = 'Transfer' THEN t.amount ELSE 0 END), 0)
+            FROM transactions t
+            JOIN categories c ON c.id = t.category_id
             """
         ).fetchone()
         label = "across all data"
@@ -249,10 +259,11 @@ def deterministic_top_categories(conn: sqlite3.Connection, month: str | None, li
     if month:
         rows = conn.execute(
             """
-            SELECT category, SUM(amount) AS total
-            FROM transactions
-            WHERE month = ? AND amount < 0 AND category != 'Transfer'
-            GROUP BY category
+            SELECT c.name, SUM(t.amount) AS total
+            FROM transactions t
+            JOIN categories c ON c.id = t.category_id
+            WHERE substr(t.posted_date, 1, 7) = ? AND t.amount < 0 AND c.name != 'Transfer'
+            GROUP BY c.name
             ORDER BY total ASC
             LIMIT ?
             """,
@@ -262,10 +273,11 @@ def deterministic_top_categories(conn: sqlite3.Connection, month: str | None, li
     else:
         rows = conn.execute(
             """
-            SELECT category, SUM(amount) AS total
-            FROM transactions
-            WHERE amount < 0 AND category != 'Transfer'
-            GROUP BY category
+            SELECT c.name, SUM(t.amount) AS total
+            FROM transactions t
+            JOIN categories c ON c.id = t.category_id
+            WHERE t.amount < 0 AND c.name != 'Transfer'
+            GROUP BY c.name
             ORDER BY total ASC
             LIMIT ?
             """,
@@ -285,10 +297,11 @@ def deterministic_top_categories(conn: sqlite3.Connection, month: str | None, li
 def deterministic_month_breakdown(conn: sqlite3.Connection, month: str) -> str:
     rows = conn.execute(
         """
-        SELECT category, SUM(amount) AS total
-        FROM transactions
-        WHERE month = ?
-        GROUP BY category
+        SELECT c.name, SUM(t.amount) AS total
+        FROM transactions t
+        JOIN categories c ON c.id = t.category_id
+        WHERE substr(t.posted_date, 1, 7) = ?
+        GROUP BY c.name
         ORDER BY total ASC
         """,
         (month,),
@@ -308,10 +321,10 @@ def deterministic_merchant_summary(conn: sqlite3.Connection, merchant: str, mont
     if month:
         rows = conn.execute(
             """
-            SELECT merchant_normalized, SUM(amount) AS total, COUNT(*) AS txn_count
-            FROM transactions
-            WHERE month = ? AND merchant_normalized LIKE ?
-            GROUP BY merchant_normalized
+            SELECT t.merchant_normalized, SUM(t.amount) AS total, COUNT(*) AS txn_count
+            FROM transactions t
+            WHERE substr(t.posted_date, 1, 7) = ? AND t.merchant_normalized LIKE ?
+            GROUP BY t.merchant_normalized
             ORDER BY ABS(total) DESC
             LIMIT 8
             """,
@@ -321,10 +334,10 @@ def deterministic_merchant_summary(conn: sqlite3.Connection, merchant: str, mont
     else:
         rows = conn.execute(
             """
-            SELECT merchant_normalized, SUM(amount) AS total, COUNT(*) AS txn_count
-            FROM transactions
-            WHERE merchant_normalized LIKE ?
-            GROUP BY merchant_normalized
+            SELECT t.merchant_normalized, SUM(t.amount) AS total, COUNT(*) AS txn_count
+            FROM transactions t
+            WHERE t.merchant_normalized LIKE ?
+            GROUP BY t.merchant_normalized
             ORDER BY ABS(total) DESC
             LIMIT 8
             """,
@@ -352,9 +365,10 @@ def deterministic_category_summary(
     if month:
         row = conn.execute(
             """
-            SELECT COALESCE(SUM(amount), 0), COUNT(*)
-            FROM transactions
-            WHERE month = ? AND lower(category) = lower(?)
+            SELECT COALESCE(SUM(t.amount), 0), COUNT(*)
+            FROM transactions t
+            JOIN categories c ON c.id = t.category_id
+            WHERE substr(t.posted_date, 1, 7) = ? AND lower(c.name) = lower(?)
             """,
             (month, category),
         ).fetchone()
@@ -365,11 +379,12 @@ def deterministic_category_summary(
         row = conn.execute(
             """
             SELECT
-                COALESCE(SUM(amount), 0),
+                COALESCE(SUM(t.amount), 0),
                 COUNT(*),
-                COUNT(DISTINCT month)
-            FROM transactions
-            WHERE lower(category) = lower(?) AND month IS NOT NULL AND month != ''
+                COUNT(DISTINCT substr(t.posted_date, 1, 7))
+            FROM transactions t
+            JOIN categories c ON c.id = t.category_id
+            WHERE lower(c.name) = lower(?) AND t.posted_date IS NOT NULL AND t.posted_date != ''
             """,
             (category,),
         ).fetchone()
@@ -386,9 +401,10 @@ def deterministic_category_summary(
 
     row = conn.execute(
         """
-        SELECT COALESCE(SUM(amount), 0), COUNT(*)
-        FROM transactions
-        WHERE lower(category) = lower(?)
+        SELECT COALESCE(SUM(t.amount), 0), COUNT(*)
+        FROM transactions t
+        JOIN categories c ON c.id = t.category_id
+        WHERE lower(c.name) = lower(?)
         """,
         (category,),
     ).fetchone()
@@ -397,7 +413,7 @@ def deterministic_category_summary(
 
 
 def known_categories(conn: sqlite3.Connection) -> list[str]:
-    rows = conn.execute("SELECT DISTINCT category FROM transactions ORDER BY category").fetchall()
+    rows = conn.execute("SELECT name FROM categories ORDER BY name").fetchall()
     return [row[0] for row in rows if row and row[0]]
 
 
@@ -486,7 +502,7 @@ def sample_rows_for_question(
         return []
 
     where = " OR ".join(
-        "(merchant_normalized LIKE ? OR description LIKE ? OR category LIKE ? OR month LIKE ?)"
+        "(t.merchant_normalized LIKE ? OR t.description LIKE ? OR c.name LIKE ? OR substr(t.posted_date, 1, 7) LIKE ?)"
         for _ in tokens
     )
 
@@ -497,10 +513,11 @@ def sample_rows_for_question(
     params.append(str(limit))
 
     query = f"""
-        SELECT COALESCE(posted_date, ''), category, amount, description
-        FROM transactions
+        SELECT COALESCE(t.posted_date, ''), c.name, t.amount, t.description
+        FROM transactions t
+        JOIN categories c ON c.id = t.category_id
         WHERE {where}
-        ORDER BY ABS(amount) DESC
+        ORDER BY ABS(t.amount) DESC
         LIMIT ?
     """
     return conn.execute(query, params).fetchall()
